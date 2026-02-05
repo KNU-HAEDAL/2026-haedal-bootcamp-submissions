@@ -1,0 +1,41 @@
+name: Check solved.ac AC Status
+
+on:
+  pull_request:
+    paths:
+      - 'problems/**'
+
+jobs:
+  solvedac-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Extract BOJ_ID from PR body
+        id: get_id
+        run: |
+          BOJ_ID=$(jq -r '.pull_request.body' "$GITHUB_EVENT_PATH" \
+                    | grep -oP '(?<=`)[^`]+(?=`)' \
+                    | head -n1)
+          echo "boj_id=$BOJ_ID" >> $GITHUB_OUTPUT
+
+      - name: Verify required problems
+        run: |
+          user="${{ steps.get_id.outputs.boj_id }}"
+          required=(10988 10872 10811 2003 10814 1152 10828 2164)
+          missing=()
+
+          for pid in "${required[@]}"; do
+            count=$(curl -s "https://solved.ac/api/v3/search/problem?query=s@${user}+id:${pid}" \
+                      | jq '.count')
+            if [ "$count" -eq 0 ]; then
+              missing+=("$pid")
+            fi
+          done
+
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "❌ 아직 풀지 않은 문제: ${missing[*]}"
+            exit 1
+          else
+            echo "✅ 모든 문제 AC 확인되었습니다!"
+          fi
