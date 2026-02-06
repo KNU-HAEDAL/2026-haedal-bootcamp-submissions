@@ -9,32 +9,63 @@ jobs:
   solvedac-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Extract BOJ_ID from PR body
+      - name: Extract BOJ_ID from PR body (strict)
         id: get_id
+        shell: bash
         run: |
-          BOJ_ID=$(jq -r '.pull_request.body' "$GITHUB_EVENT_PATH" \
-                    | grep -oP '(?<=`)[^`]+(?=`)' \
-                    | head -n1)
-          echo "boj_id=$BOJ_ID" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          body="$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")"
 
-      - name: Verify required problems
+          # "BOJ 아이디" 섹션 이후 라인에서 첫 번째 `...`만 추출
+          BOJ_ID="$(printf '%s\n' "$body" | awk '
+            /### *.*BOJ *아이디/ {flag=1; next}
+            flag && match($0, /`([^`]+)`/, a) {print a[1]; exit}
+          ')"
+
+          if [ -z "${BOJ_ID:-}" ]; then
+            echo "❌ PR 본문에서 BOJ 아이디를 찾지 못했습니다. '### 👤 BOJ 아이디' 아래에 `아이디` 형식으로 작성했는지 확인하세요."
+            exit 1
+          fi
+
+          echo "boj_id=$BOJ_ID" >> "$GITHUB_OUTPUT"
+          echo "BOJ_ID=$BOJ_ID"
+
+      - name: Verify required problems via solved.ac
+        shell: bash
         run: |
+          set -euo pipefail
           user="${{ steps.get_id.outputs.boj_id }}"
           required=(10988 10872 10811 2003 10814 1152 10828 2164)
           missing=()
 
           for pid in "${required[@]}"; do
-            count=$(curl -s "https://solved.ac/api/v3/search/problem?query=s@${user}+id:${pid}" \
-                      | jq '.count')
+            # '+' 대신 '%20'(공백) 사용해서 쿼리 안정화
+            q="s@${user}%20id:${pid}"
+
+            # 네트워크 순간 이슈 대비 간단 재시도
+            count="$(
+              for i in 1 2 3; do
+                resp="$(curl -sSf "https://solved.ac/api/v3/search/problem?query=${q}" || true)"
+                if [ -n "$resp" ]; then
+                  echo "$resp" | jq -r '.count'
+                  break
+                fi
+                sleep 1
+              done
+            )"
+
+            if [ -z "${count:-}" ] || ! [[ "$count" =~ ^[0-9]+$ ]]; then
+              echo "❌ solved.ac 응답이 비정상입니다. user=$user, pid=$pid"
+              exit 1
+            fi
+
             if [ "$count" -eq 0 ]; then
               missing+=("$pid")
             fi
           done
 
           if [ ${#missing[@]} -ne 0 ]; then
-            echo "❌ 아직 풀지 않은 문제: ${missing[*]}"
+            echo "❌ 아직 solved.ac 기준으로 AC가 확인되지 않은 문제: ${missing[*]}"
             exit 1
           else
             echo "✅ 모든 문제 AC 확인되었습니다!"
